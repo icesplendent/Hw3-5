@@ -1,3 +1,5 @@
+#include "accelerometer.h"
+#include "gyro.h"
 #include "mbed.h"
 using namespace std::chrono_literals;
 static BufferedSerial pc_uart(USBTX, USBRX);  // define USB UART port to PC
@@ -18,6 +20,22 @@ Thread t;
 int idC = 0;
 int idE = 0;
 int idG = 0;
+
+Accelerometer acc;
+Gyro gyro;
+double Accel[3] = {0};
+double Gyro[3] = {0};
+double accAngleX = 0;
+double accAngleY = 0;
+double elapsedTime = 0;
+double roll, pitch, yaw;
+double gyroAngleX = 0;
+double gyroAngleY = 0;
+int counter = 0;
+int idR[32] = {0};
+int indexR = 0;
+double temp[3] = {0};
+int during = 8;
 
 float waveform[waveformLength] = {  // 128 samples of a sine waveform
     0.500, 0.525, 0.549, 0.574, 0.598, 0.622, 0.646, 0.670, 0.693, 0.715, 0.737,
@@ -72,12 +90,12 @@ void printWaveform(void) {
 }
 
 void playNote(int freq, int duration) {
-    int i = duration * freq;
+    int i = duration * freq / during;
     int j = waveformLength;
     // 1000000 us = 1s, 1 period need to show freq 次 wave, each wavefrom is
     // contrcuted by 128 samples (sine wave),
     int waitTime = (1000000 / waveformLength / freq - lookUpTableDelay) << 0;
-    printf("Play notes %d\n", freq);
+    printf("Play notes %d %d %f\n", freq, during, pitch + roll + yaw);
     while (i--) {
         j = waveformLength;
         while (j--) {
@@ -100,15 +118,88 @@ void stopPlayNoteC(void) { queue.cancel(idC); }
 void stopPlayNoteE(void) { queue.cancel(idE); }
 void stopPlayNoteG(void) { queue.cancel(idG); }
 
+void record(void) {
+    temp[0] = 0;
+    temp[1] = 0;
+    temp[2] = 0;
+
+    // 10 samples to average
+    for (int i = 0; i < 10; i++) {
+        acc.GetAcceleromterSensor(Accel);
+        acc.GetAcceleromterCalibratedData(Accel);
+        temp[0] += Accel[0];
+        temp[1] += Accel[1];
+        temp[2] += Accel[2];
+    }
+
+    Accel[0] = temp[0] / 10;
+    Accel[1] = temp[1] / 10;
+    Accel[2] = temp[2] / 10;
+
+    // printf("Calibrated ACC= %f, %f, %f\n", Accel[0], Accel[1], Accel[2]);
+
+    // Calculating Roll and Pitch from the accelerometer data
+    accAngleX =
+        (atan(Accel[1] / sqrt(Accel[0] * Accel[1] + Accel[2] * Accel[2])) *
+         180 / SENSOR_PI_DOUBLE);
+    accAngleY =
+        (atan(-1 * Accel[1] / sqrt(Accel[1] * Accel[1] + Accel[2] * Accel[2])) *
+         180 / SENSOR_PI_DOUBLE);
+
+    gyro.GetGyroSensor(Gyro);
+    gyro.GetGyroCalibratedData(Gyro);
+
+    // printf("Calibrated Gyro= %f, %f, %f\n", Gyro[0], Gyro[1], Gyro[2]);
+    elapsedTime = 0.1;  // 100ms by thread sleep time
+    // Currently the raw values are in degrees per seconds, deg/s, so we need to
+    // multiply by sendonds (s) to get the angle in degrees
+    gyroAngleX = gyroAngleX + Gyro[0] * elapsedTime;  // deg/s * s = deg
+    gyroAngleY = gyroAngleY + Gyro[1] * elapsedTime;
+    yaw = yaw + Gyro[2] * elapsedTime;
+    // Complementary filter - combine acceleromter and gyro angle values
+    // roll = 0.96 * gyroAngleX + 0.04 * accAngleX;
+    // pitch = 0.96 * gyroAngleY + 0.04 * accAngleY;
+    // Use Acc data only
+    roll = accAngleX;
+    pitch = accAngleY;
+    printf("%f/%f/%f\n", roll, pitch, yaw);
+
+    if (yaw + roll + pitch <= 0) {
+        during = 8;
+    } else if (yaw + roll + pitch <= 2) {
+        during = 4;
+    } else if (yaw + roll + pitch <= 4) {
+        during = 2;
+    } else {
+        during = 1;
+    }
+
+    // ThisThread::sleep_for(10ms);
+}
+
+// modify: record every 10ms, and average the results at 100ms (10 samples)
+void startRecord(void) {
+    // printf("---start---\n");
+    idR[indexR++] = queue.call_every(10ms, record);
+    indexR = indexR % 32;
+}
+
+void stopRecord(void) {
+    // printf("---stop---\n");
+    for (auto &i : idR) queue.cancel(i);
+}
+
 int main(void) {
     t.start(callback(&queue, &EventQueue::dispatch_forever));
-    button.rise(queue.event(loadWaveformHandler));
+    //   button.rise(queue.event(loadWaveformHandler));
+    button.fall(queue.event(startRecord));
+    button.rise(queue.event(stopRecord));
     keyboard0.fall(queue.event(playNoteC));
     keyboard1.fall(queue.event(playNoteE));
     keyboard2.fall(queue.event(playNoteG));
     keyboard0.rise(queue.event(stopPlayNoteC));
     keyboard1.rise(queue.event(stopPlayNoteE));
     keyboard2.rise(queue.event(stopPlayNoteG));
-    loadWaveform();  // Comment out to test the keyboard
+    //   loadWaveform(); //Comment out to test the keyboard
     printWaveform();
 }
